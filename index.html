@@ -55,6 +55,77 @@ const GROUP_COLORS = {
 const TOTAL_TARGET = 9005;
 const TOTAL_AVG = 10910.08;
 
+/* ============ LIVE CONNECTION ============
+   Once you deploy the Apps Script (Code.gs) as a Web App, paste its URL
+   and your token into the Settings panel — this dashboard will then read
+   live from your Google Sheet and let you add expenses that write back to it.
+*/
+let CONFIG = {
+  url: localStorage.getItem('budget_apps_script_url') || '',
+  token: localStorage.getItem('budget_apps_script_token') || ''
+};
+let liveData = null;       // raw response from doGet, once fetched
+let liveError = null;
+let liveLoading = false;
+
+function saveConfig(url, token){
+  CONFIG = {url: url.trim(), token: token.trim()};
+  localStorage.setItem('budget_apps_script_url', CONFIG.url);
+  localStorage.setItem('budget_apps_script_token', CONFIG.token);
+}
+
+async function fetchLiveData(){
+  if(!CONFIG.url || !CONFIG.token) return;
+  liveLoading = true; liveError = null;
+  render();
+  try{
+    const sep = CONFIG.url.includes('?') ? '&' : '?';
+    const res = await fetch(CONFIG.url + sep + 'token=' + encodeURIComponent(CONFIG.token));
+    const data = await res.json();
+    if(data.error){ liveError = data.error; liveData = null; }
+    else { liveData = data; liveError = null; }
+  }catch(err){
+    liveError = 'Could not reach the sheet (' + err.message + ')';
+    liveData = null;
+  }
+  liveLoading = false;
+  render();
+}
+
+async function postExpense(entry){
+  if(!CONFIG.url || !CONFIG.token) throw new Error('Connect your sheet in Settings first.');
+  const sep = CONFIG.url.includes('?') ? '&' : '?';
+  const res = await fetch(CONFIG.url + sep + 'token=' + encodeURIComponent(CONFIG.token), {
+    method: 'POST',
+    headers: {'Content-Type': 'text/plain;charset=utf-8'}, // avoids CORS preflight against Apps Script
+    body: JSON.stringify(entry)
+  });
+  const data = await res.json();
+  if(data.error) throw new Error(data.error);
+  return data;
+}
+
+/* Effective values: live sheet data if connected, else the static Jan–Jul baseline above */
+function getGroups(){
+  if(liveData && liveData.groups) return liveData.groups;
+  return GROUP_ORDER.map(g => ({name:g, target:GROUP_TARGETS[g], avg:groupAvg(g), variance:GROUP_TARGETS[g]-groupAvg(g)}));
+}
+function getCategories(){
+  if(liveData && liveData.categories) return liveData.categories.map(c=>({...c, monthly: (CATEGORIES.find(x=>x.name===c.name)||{}).monthly || []}));
+  return CATEGORIES;
+}
+function getTotals(){
+  if(liveData && liveData.totals) return liveData.totals;
+  return {avg: TOTAL_AVG, target: TOTAL_TARGET, cutPct: (TOTAL_AVG-TOTAL_TARGET)/TOTAL_AVG};
+}
+function getCategoryOptions(){
+  if(liveData && liveData.categoryOptions) return liveData.categoryOptions;
+  return CATEGORIES.map(c=>({name:c.name, group:c.group}));
+}
+function getEntries(){
+  return (liveData && liveData.entries) ? liveData.entries : [];
+}
+
 /* ============ HELPERS ============ */
 const fmt = n => {
   const rounded = Math.round(n);
@@ -74,6 +145,9 @@ let state = {
   search: "",
   sim: {}, // category name -> simulated target value
   simActive: false,
+  settingsOpen: !localStorage.getItem('budget_apps_script_url'),
+  addForm: { date: new Date().toISOString().slice(0,10), category: "", description: "", amount: "" },
+  addStatus: null, // {type:'ok'|'err', msg}
 };
 CATEGORIES.forEach(c => state.sim[c.name] = c.target);
 
@@ -96,12 +170,16 @@ function render(){
   root.innerHTML = "";
   root.appendChild(buildStyle());
   root.appendChild(buildHeader());
+  root.appendChild(buildStatusBanner());
   root.appendChild(buildHero());
   root.appendChild(buildGroupSection());
   root.appendChild(buildTrendSection());
   root.appendChild(buildLedgerSection());
+  root.appendChild(buildAddExpenseSection());
+  root.appendChild(buildLoggedEntriesSection());
   root.appendChild(buildSimSection());
   root.appendChild(buildFooter());
+  if(state.settingsOpen) root.appendChild(buildSettingsModal());
 }
 
 function el(tag, cls, html){
@@ -232,6 +310,43 @@ function buildStyle(){
     }
     .btn:hover{background:#c9a227; color:#0d1826;}
 
+    /* header gear */
+    .header-inner{display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap;}
+    .gear-btn{
+      font-family:'IBM Plex Mono',monospace; font-size:11.5px; background:transparent; color:#8b96a8;
+      border:1px solid rgba(139,150,168,0.3); padding:7px 14px; border-radius:2px; cursor:pointer; white-space:nowrap;
+    }
+    .gear-btn:hover{border-color:#c9a227; color:#c9a227;}
+
+    /* banners */
+    .banner{margin-top:20px; padding:10px 16px; font-size:12.5px; font-family:'IBM Plex Mono',monospace; border-left:2px solid; border-radius:2px;}
+    .banner-info{background:rgba(139,150,168,0.08); border-color:#8b96a8; color:#c7cbd4;}
+    .banner-ok{background:rgba(107,144,128,0.1); border-color:#7fae94; color:#a9c9b8;}
+    .banner-error{background:rgba(194,84,59,0.1); border-color:#d9765b; color:#e8a794;}
+    .banner-link{background:none; border:none; color:#c9a227; text-decoration:underline; cursor:pointer; font-family:inherit; font-size:inherit; padding:0;}
+
+    /* settings modal */
+    .modal-overlay{
+      position:fixed; inset:0; background:rgba(13,24,38,0.75); display:flex; align-items:center; justify-content:center;
+      z-index:50; padding:20px;
+    }
+    .modal{
+      background:#142238; border:1px solid rgba(201,162,39,0.4); padding:28px; max-width:480px; width:100%;
+    }
+    .modal-copy{font-size:12.5px; color:#8b96a8; margin:10px 0 18px 0; line-height:1.5;}
+    .modal-label{font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:0.08em; color:#8b96a8; margin:12px 0 6px 0;}
+    .modal-input{width:100%; box-sizing:border-box;}
+
+    /* add expense form */
+    .add-form-grid{display:grid; grid-template-columns:150px 1fr 1fr 130px; gap:12px; margin-bottom:16px;}
+    .add-status{margin-top:14px; font-family:'IBM Plex Mono',monospace; font-size:12px; padding:8px 12px; border-radius:2px;}
+    .add-status-ok{background:rgba(107,144,128,0.12); color:#a9c9b8;}
+    .add-status-err{background:rgba(194,84,59,0.12); color:#e8a794;}
+
+    @media (max-width:640px){
+      .add-form-grid{grid-template-columns:1fr;}
+    }
+
     footer{margin-top:60px; padding-top:20px; border-top:1px solid rgba(139,150,168,0.15); font-family:'IBM Plex Mono',monospace; font-size:11px; color:#5c6779;}
 
     @media (max-width:640px){
@@ -253,24 +368,105 @@ function buildStyle(){
 /* ============ HEADER ============ */
 function buildHeader(){
   const wrap = el('div','lg-header');
-  const inner = el('div','wrap');
-  inner.appendChild(el('div','lg-eyebrow','LEDGER · 2026'));
-  inner.appendChild(el('div','lg-title serif','Spending Dashboard'));
-  inner.appendChild(el('div','lg-sub','Actuals from bills26 (Jan–Jul) vs. Budget 2026 targets · 7-month average · all figures in PLN'));
+  const inner = el('div','wrap header-inner');
+  const textCol = el('div');
+  textCol.appendChild(el('div','lg-eyebrow','LEDGER · 2026'));
+  textCol.appendChild(el('div','lg-title serif','Spending Dashboard'));
+  textCol.appendChild(el('div','lg-sub','Actuals from bills26 (Jan–Jul) vs. Budget 2026 targets · 7-month average · all figures in PLN'));
+  inner.appendChild(textCol);
+
+  const gear = document.createElement('button');
+  gear.className = 'gear-btn';
+  gear.title = 'Connect your Google Sheet';
+  gear.innerHTML = '⚙ Settings';
+  gear.onclick = ()=>{ state.settingsOpen = true; render(); };
+  inner.appendChild(gear);
+
   wrap.appendChild(inner);
   return wrap;
+}
+
+/* ============ STATUS BANNER ============ */
+function buildStatusBanner(){
+  const wrap = el('div','wrap');
+  if(!CONFIG.url){
+    const b = el('div','banner banner-info');
+    b.innerHTML = `Showing the static Jan–Jul snapshot. <button class="banner-link" id="connect-link">Connect your Google Sheet</button> to see live data and add expenses.`;
+    wrap.appendChild(b);
+    setTimeout(()=>{ const link=document.getElementById('connect-link'); if(link) link.onclick=()=>{state.settingsOpen=true; render();}; },0);
+  } else if(liveLoading){
+    wrap.appendChild(el('div','banner banner-info','Loading live data from your sheet…'));
+  } else if(liveError){
+    const b = el('div','banner banner-error');
+    b.innerHTML = `Could not load your sheet: ${liveError}. Showing the static Jan–Jul snapshot instead. <button class="banner-link" id="retry-link">Retry</button>`;
+    wrap.appendChild(b);
+    setTimeout(()=>{ const link=document.getElementById('retry-link'); if(link) link.onclick=fetchLiveData; },0);
+  } else if(liveData){
+    wrap.appendChild(el('div','banner banner-ok','Connected — showing live data from your Google Sheet.'));
+  }
+  return wrap;
+}
+
+/* ============ SETTINGS MODAL ============ */
+function buildSettingsModal(){
+  const overlay = el('div','modal-overlay');
+  overlay.onclick = (e)=>{ if(e.target===overlay){ state.settingsOpen=false; render(); } };
+
+  const modal = el('div','modal');
+  modal.appendChild(el('div','section-title serif','Connect your Google Sheet'));
+  modal.appendChild(el('div','modal-copy','Paste the Web app URL and the token from your Apps Script deployment (see Code.gs). These are stored only in this browser.'));
+
+  const urlLabel = el('div','modal-label','Web app URL');
+  const urlInput = document.createElement('input');
+  urlInput.className = 'search-input modal-input';
+  urlInput.placeholder = 'https://script.google.com/macros/s/…/exec';
+  urlInput.value = CONFIG.url;
+
+  const tokenLabel = el('div','modal-label','Token');
+  const tokenInput = document.createElement('input');
+  tokenInput.className = 'search-input modal-input';
+  tokenInput.placeholder = 'the TOKEN value from Code.gs';
+  tokenInput.value = CONFIG.token;
+
+  modal.appendChild(urlLabel);
+  modal.appendChild(urlInput);
+  modal.appendChild(tokenLabel);
+  modal.appendChild(tokenInput);
+
+  const btnRow = el('div','sim-buttons');
+  const saveBtn = document.createElement('button');
+  saveBtn.className = 'btn';
+  saveBtn.textContent = 'Save & connect';
+  saveBtn.onclick = ()=>{
+    saveConfig(urlInput.value, tokenInput.value);
+    state.settingsOpen = false;
+    render();
+    fetchLiveData();
+  };
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn';
+  cancelBtn.textContent = 'Close';
+  cancelBtn.onclick = ()=>{ state.settingsOpen=false; render(); };
+  btnRow.appendChild(saveBtn);
+  btnRow.appendChild(cancelBtn);
+  modal.appendChild(btnRow);
+
+  overlay.appendChild(modal);
+  return overlay;
 }
 
 /* ============ HERO ============ */
 function buildHero(){
   const section = el('div','wrap');
   const hero = el('div','hero');
+  const totals = getTotals();
+  const over = totals.avg - totals.target;
 
   const left = el('div','hero-left');
   const rows = [
-    ["7-month actual average", fmt1(TOTAL_AVG)],
-    ["Monthly target ceiling", fmt1(TOTAL_TARGET)],
-    ["Over target by", "+"+fmt1(TOTAL_AVG-TOTAL_TARGET)],
+    ["7-month actual average", fmt1(totals.avg)],
+    ["Monthly target ceiling", fmt1(totals.target)],
+    ["Over target by", (over>=0?"+":"-")+fmt1(Math.abs(over))],
   ];
   rows.forEach(([k,v])=>{
     const r = el('div','hero-row');
@@ -279,12 +475,12 @@ function buildHero(){
     left.appendChild(r);
   });
   const bigLabel = el('div','hero-label','AVG MONTHLY SPEND');
-  const bigNum = el('div','hero-number over',fmt1(TOTAL_AVG));
+  const bigNum = el('div','hero-number over',fmt1(totals.avg));
   left.insertBefore(bigNum, left.firstChild);
   left.insertBefore(bigLabel, left.firstChild);
 
   const right = el('div','hero-right');
-  const cutPct = (TOTAL_AVG-TOTAL_TARGET)/TOTAL_AVG;
+  const cutPct = totals.cutPct!==undefined ? totals.cutPct : over/totals.avg;
   const stamp = el('div','stamp');
   stamp.appendChild(el('div','big', (cutPct*100).toFixed(1)+"%"));
   stamp.appendChild(el('div','small','CUT NEEDED · GOAL ≥15%'));
@@ -304,14 +500,14 @@ function buildGroupSection(){
   head.appendChild(el('div','section-note','target line in white · fill = 7-mo avg'));
   wrap.appendChild(head);
 
-  const maxVal = Math.max(...GROUP_ORDER.map(g=>Math.max(GROUP_TARGETS[g], groupAvg(g))));
+  const groups = getGroups();
+  const maxVal = Math.max(...groups.map(g=>Math.max(g.target, g.avg)));
 
-  GROUP_ORDER.forEach(g=>{
-    const avg = groupAvg(g);
-    const target = GROUP_TARGETS[g];
+  groups.forEach(g=>{
+    const avg = g.avg, target = g.target;
     const row = el('div','group-row');
     const nameEl = el('div','group-name');
-    nameEl.innerHTML = `<span class="legend-dot" style="background:${GROUP_COLORS[g]}"></span>${g}`;
+    nameEl.innerHTML = `<span class="legend-dot" style="background:${GROUP_COLORS[g.name]||'#8b96a8'}"></span>${g.name}`;
     row.appendChild(nameEl);
 
     const track = el('div','group-bar-track');
@@ -319,7 +515,7 @@ function buildGroupSection(){
     const targetPct = Math.min(100,(target/maxVal)*100);
     const fill = el('div','group-bar-fill');
     fill.style.width = fillPct+"%";
-    fill.style.background = GROUP_COLORS[g];
+    fill.style.background = GROUP_COLORS[g.name]||'#8b96a8';
     const tline = el('div','group-bar-target');
     tline.style.left = targetPct+"%";
     track.appendChild(fill);
@@ -450,9 +646,9 @@ function renderLedgerTableOnly(){
 }
 
 function buildLedgerTable(){
-  let rows = CATEGORIES.map(c=>({
+  let rows = getCategories().map(c=>({
     ...c,
-    variance: c.target - c.avg // positive = under budget, negative = over
+    variance: c.variance!==undefined ? c.variance : (c.target - c.avg) // positive = under budget, negative = over
   }));
 
   if(state.filterGroup!=="All") rows = rows.filter(r=>r.group===state.filterGroup);
@@ -535,6 +731,125 @@ function buildLedgerTable(){
   });
   table.appendChild(tbody);
   return table;
+}
+
+/* ============ ADD EXPENSE SECTION ============ */
+function buildAddExpenseSection(){
+  const wrap = el('div','section wrap');
+  const head = el('div','section-head');
+  head.appendChild(el('div','section-title serif','Add an expense'));
+  head.appendChild(el('div','section-note', CONFIG.url ? 'writes straight to Expense Log 2026' : 'connect your sheet to enable'));
+  wrap.appendChild(head);
+
+  const box = el('div','sim-box');
+  const disabled = !CONFIG.url;
+
+  const grid = el('div','add-form-grid');
+
+  const dateInput = document.createElement('input');
+  dateInput.type = 'date';
+  dateInput.className = 'search-input modal-input';
+  dateInput.value = state.addForm.date;
+  dateInput.disabled = disabled;
+  dateInput.onchange = e=>state.addForm.date = e.target.value;
+
+  const catSelect = document.createElement('select');
+  catSelect.className = 'search-input modal-input';
+  catSelect.disabled = disabled;
+  const opts = getCategoryOptions();
+  const blank = document.createElement('option'); blank.value=''; blank.textContent = disabled ? 'Connect sheet first' : 'Select category…';
+  catSelect.appendChild(blank);
+  opts.forEach(o=>{
+    const opt = document.createElement('option');
+    opt.value = o.name; opt.textContent = o.name + ' (' + o.group + ')';
+    catSelect.appendChild(opt);
+  });
+  catSelect.value = state.addForm.category;
+  catSelect.onchange = e=>state.addForm.category = e.target.value;
+
+  const descInput = document.createElement('input');
+  descInput.type = 'text';
+  descInput.className = 'search-input modal-input';
+  descInput.placeholder = 'Description (optional)';
+  descInput.value = state.addForm.description;
+  descInput.disabled = disabled;
+  descInput.oninput = e=>state.addForm.description = e.target.value;
+
+  const amountInput = document.createElement('input');
+  amountInput.type = 'number';
+  amountInput.step = '0.01';
+  amountInput.min = '0';
+  amountInput.className = 'search-input modal-input';
+  amountInput.placeholder = 'Amount (PLN)';
+  amountInput.value = state.addForm.amount;
+  amountInput.disabled = disabled;
+  amountInput.oninput = e=>state.addForm.amount = e.target.value;
+
+  [dateInput, catSelect, descInput, amountInput].forEach(i=>grid.appendChild(i));
+  box.appendChild(grid);
+
+  const btnRow = el('div','sim-buttons');
+  const addBtn = document.createElement('button');
+  addBtn.className = 'btn';
+  addBtn.textContent = disabled ? 'Connect sheet to add' : 'Add expense';
+  addBtn.disabled = disabled;
+  addBtn.onclick = async ()=>{
+    if(!state.addForm.category || !state.addForm.amount){
+      state.addStatus = {type:'err', msg:'Pick a category and enter an amount.'};
+      render(); return;
+    }
+    addBtn.textContent = 'Adding…'; addBtn.disabled = true;
+    try{
+      await postExpense(state.addForm);
+      state.addStatus = {type:'ok', msg:'Added to your sheet.'};
+      state.addForm = { date: new Date().toISOString().slice(0,10), category: "", description: "", amount: "" };
+      await fetchLiveData();
+    }catch(err){
+      state.addStatus = {type:'err', msg: err.message};
+      render();
+    }
+  };
+  btnRow.appendChild(addBtn);
+  box.appendChild(btnRow);
+
+  if(state.addStatus){
+    const s = el('div', 'add-status ' + (state.addStatus.type==='ok'?'add-status-ok':'add-status-err'), state.addStatus.msg);
+    box.appendChild(s);
+  }
+
+  wrap.appendChild(box);
+  return wrap;
+}
+
+/* ============ LOGGED ENTRIES SECTION ============ */
+function buildLoggedEntriesSection(){
+  const entries = getEntries();
+  if(!CONFIG.url) return el('div');
+
+  const wrap = el('div','section wrap');
+  const head = el('div','section-head');
+  head.appendChild(el('div','section-title serif','Logged this period'));
+  head.appendChild(el('div','section-note', entries.length + ' entries · most recent first'));
+  wrap.appendChild(head);
+
+  if(entries.length===0){
+    wrap.appendChild(el('div','section-note','No expenses logged yet — add one above and it will show up here.'));
+    return wrap;
+  }
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>Date</th><th>Category</th><th>Group</th><th>Description</th><th class="num">Amount</th></tr>';
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  entries.slice(0,50).forEach(en=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${en.date}</td><td class="cat-name">${en.category}</td><td>${en.group||''}</td><td class="cat-name">${en.description||''}</td><td class="num">${fmt1(en.amount)}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
 }
 
 /* ============ SIMULATOR SECTION ============ */
@@ -621,6 +936,7 @@ function buildFooter(){
 }
 
 render();
+if(CONFIG.url && CONFIG.token) fetchLiveData();
 </script>
 </body>
 </html>
