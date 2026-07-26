@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2026 Spending Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+</head>
+<body>
+<div id="root"></div>
+<script>
+/* ============ DATA ============
+   Sourced from Dashboard 2026 (category breakdown, group summary)
+   and bills26 (Jan–Jul 2026 monthly actuals). All figures PLN.
+*/
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul"];
+
+const CATEGORIES = [
+  {name:"Taxation/ZUS/Legal/Accounting", group:"Fixed", target:2580, avg:2577.34, monthly:[4875.93,1325.11,4054.32,282.90,3397.91,1909.11,2196.11]},
+  {name:"Mortgage/Credit", group:"Fixed", target:2255, avg:2253.21, monthly:[2311.45,2308.46,2097.26,2302.50,2230.77,2296.54,2225.46]},
+  {name:"Groceries/Shopping", group:"Variable", target:1400, avg:1596.92, monthly:[1595.01,1583.84,1928.09,1140.30,993.37,2579.50,1358.33]},
+  {name:"Other/unknown (uncategorized)", group:"Untracked", target:400, avg:1529.85, monthly:[1924.49,940.58,2074.63,985.57,2788.10,1580.22,415.37]},
+  {name:"Entertainment/Electronics", group:"Discretionary", target:450, avg:767.64, monthly:[1746.96,339.17,495.34,640.54,634.34,1211.16,305.95]},
+  {name:"Car (fuel/wash/parking)", group:"Variable", target:280, avg:319.07, monthly:[222.14,347.01,253.20,404.67,23.80,605.13,377.57]},
+  {name:"Insurance (Life/Health)", group:"Fixed", target:260, avg:258.33, monthly:[242.93,203.36,440.88,311.25,305.18,146.11,158.60]},
+  {name:"Transport/Travel/Taxi", group:"Variable", target:190, avg:211.40, monthly:[57.93,314.84,129.25,879.31,51.00,25.00,22.50]},
+  {name:"Sports/hobbies", group:"Discretionary", target:130, avg:204.99, monthly:[169.99,169.99,169.99,169.99,169.99,524.96,59.99]},
+  {name:"Home Improvement", group:"Discretionary", target:100, avg:183.20, monthly:[0,0,263.73,80.00,500.95,437.75,0]},
+  {name:"Gas, Heating, Water (hot)", group:"Fixed", target:180, avg:178.79, monthly:[228.82,324.01,277.02,175.41,115.88,62.28,68.10]},
+  {name:"Health/Doc/Meds/Pharmacy", group:"Variable", target:130, avg:149.07, monthly:[47.98,171.96,694.57,0,0,128.99,0]},
+  {name:"Restaurant/Cafe/Fun", group:"Discretionary", target:90, avg:142.43, monthly:[239.70,96.20,175.00,36.10,67.00,255.14,127.90]},
+  {name:"Internet/phone/iCloud/subs", group:"Fixed", target:110, avg:107.24, monthly:[117.99,62.98,82.99,109.98,210.73,102.04,63.99]},
+  {name:"Personal care/hairdresser", group:"Variable", target:90, avg:102.57, monthly:[70.00,70,70.00,33.00,15.00,460.00,0]},
+  {name:"Admin (govt+HOA)", group:"Fixed", target:90, avg:88.70, monthly:[106.00,285,33.00,33.00,48.00,88.00,27.88]},
+  {name:"Groceries (alc/tobacco)", group:"Discretionary", target:40, avg:64.59, monthly:[34.04,0,79.77,27.59,43.31,0,267.40]},
+  {name:"Mental health/therapy", group:"Protected", target:60, avg:59.35, monthly:[205.58,209.90,0,0,0,0,0]},
+  {name:"Electricity (Tauron)", group:"Fixed", target:60, avg:57.97, monthly:[0,230.87,0,0,0,174.92,0]},
+  {name:"Water (cold)", group:"Fixed", target:60, avg:57.41, monthly:[79.00,0,112.74,0,69.71,0,140.40]},
+  {name:"Trash", group:"Fixed", target:0, avg:0, monthly:[0,0,0,0,0,0,0]},
+  {name:"Clothes/outfit/textiles", group:"Discretionary", target:50, avg:0, monthly:[0,0,0,0,0,0,0]},
+];
+
+const GROUP_ORDER = ["Fixed","Variable","Protected","Discretionary","Untracked"];
+const GROUP_TARGETS = {Fixed:5595, Variable:2090, Protected:60, Discretionary:860, Untracked:400};
+const GROUP_COLORS = {
+  Fixed:"#6f8fb3",
+  Variable:"#c9a227",
+  Protected:"#6b9080",
+  Discretionary:"#c2543b",
+  Untracked:"#8b96a8"
+};
+
+const TOTAL_TARGET = 9005;
+const TOTAL_AVG = 10910.08;
+
+/* ============ HELPERS ============ */
+const fmt = n => {
+  const rounded = Math.round(n);
+  return (rounded<0?"-":"") + Math.abs(rounded).toLocaleString('en-US') + " zł";
+};
+const fmt1 = n => {
+  const s = n.toFixed(0);
+  return (n<0?"-":"") + Math.abs(n).toFixed(0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",") + " zł";
+};
+const pct = n => (n*100).toFixed(1) + "%";
+
+/* ============ STATE ============ */
+let state = {
+  sortKey: "variance",
+  sortDir: "desc",
+  filterGroup: "All",
+  search: "",
+  sim: {}, // category name -> simulated target value
+  simActive: false,
+};
+CATEGORIES.forEach(c => state.sim[c.name] = c.target);
+
+/* ============ RENDER ROOT ============ */
+const root = document.getElementById('root');
+
+function computeSimTotals(){
+  let total = 0;
+  const byGroup = {};
+  GROUP_ORDER.forEach(g=>byGroup[g]=0);
+  CATEGORIES.forEach(c=>{
+    const v = state.sim[c.name];
+    total += v;
+    byGroup[c.group] += v;
+  });
+  return {total, byGroup};
+}
+
+function render(){
+  root.innerHTML = "";
+  root.appendChild(buildStyle());
+  root.appendChild(buildHeader());
+  root.appendChild(buildHero());
+  root.appendChild(buildGroupSection());
+  root.appendChild(buildTrendSection());
+  root.appendChild(buildLedgerSection());
+  root.appendChild(buildSimSection());
+  root.appendChild(buildFooter());
+}
+
+function el(tag, cls, html){
+  const e = document.createElement(tag);
+  if(cls) e.className = cls;
+  if(html!==undefined) e.innerHTML = html;
+  return e;
+}
+
+/* ============ STYLE ============ */
+function buildStyle(){
+  const s = document.createElement('style');
+  s.textContent = `
+    *{box-sizing:border-box; margin:0; padding:0;}
+    body{background:#0d1826;}
+    #root{
+      background:#0d1826;
+      color:#e8e9ec;
+      font-family:'IBM Plex Sans', sans-serif;
+      min-height:100vh;
+      padding:0 0 80px 0;
+    }
+    .wrap{max-width:1040px; margin:0 auto; padding:0 28px;}
+    .serif{font-family:'Source Serif 4', serif;}
+    .mono{font-family:'IBM Plex Mono', monospace;}
+
+    /* header */
+    .lg-header{border-bottom:1px solid rgba(201,162,39,0.25); padding:36px 0 24px 0;}
+    .lg-eyebrow{
+      font-family:'IBM Plex Mono', monospace; font-size:11px; letter-spacing:0.18em;
+      text-transform:uppercase; color:#c9a227; margin-bottom:10px;
+    }
+    .lg-title{font-size:32px; font-weight:600; color:#f2ede2; letter-spacing:-0.01em;}
+    .lg-sub{font-size:14px; color:#8b96a8; margin-top:6px; font-family:'IBM Plex Mono',monospace;}
+
+    /* hero / stamp */
+    .hero{
+      display:grid; grid-template-columns: 1.3fr 1fr; gap:0;
+      border:1px solid rgba(201,162,39,0.25); margin-top:28px;
+      background:linear-gradient(180deg, rgba(201,162,39,0.04), transparent);
+    }
+    .hero-left{padding:28px 32px; border-right:1px solid rgba(201,162,39,0.2);}
+    .hero-right{padding:28px 32px; display:flex; flex-direction:column; justify-content:center; align-items:center; position:relative;}
+    .hero-label{font-family:'IBM Plex Mono',monospace; font-size:10.5px; letter-spacing:0.14em; text-transform:uppercase; color:#8b96a8; margin-bottom:6px;}
+    .hero-number{font-family:'IBM Plex Mono',monospace; font-size:44px; font-weight:600; color:#f2ede2; line-height:1;}
+    .hero-number.over{color:#d9765b;}
+    .hero-row{display:flex; justify-content:space-between; align-items:baseline; padding:10px 0; border-bottom:1px dashed rgba(139,150,168,0.25);}
+    .hero-row:last-child{border-bottom:none;}
+    .hero-row .k{font-size:13px; color:#8b96a8;}
+    .hero-row .v{font-family:'IBM Plex Mono',monospace; font-size:16px; color:#e8e9ec;}
+    .stamp{
+      width:150px; height:150px; border-radius:50%;
+      border:2.5px solid #d9765b; display:flex; flex-direction:column;
+      align-items:center; justify-content:center; transform:rotate(-8deg);
+      color:#d9765b;
+    }
+    .stamp .big{font-family:'Source Serif 4',serif; font-weight:700; font-size:30px; line-height:1;}
+    .stamp .small{font-family:'IBM Plex Mono',monospace; font-size:9px; letter-spacing:0.12em; text-transform:uppercase; margin-top:6px; text-align:center; padding:0 14px;}
+
+    /* section */
+    .section{margin-top:52px;}
+    .section-head{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:18px; flex-wrap:wrap; gap:8px;}
+    .section-title{font-family:'Source Serif 4',serif; font-size:21px; font-weight:600; color:#f2ede2;}
+    .section-note{font-size:12.5px; color:#8b96a8; font-family:'IBM Plex Mono',monospace;}
+
+    /* groups */
+    .group-row{display:grid; grid-template-columns: 150px 1fr 190px; gap:16px; align-items:center; padding:12px 0; border-bottom:1px solid rgba(139,150,168,0.12);}
+    .group-name{font-size:14px; font-weight:500;}
+    .group-bar-track{position:relative; height:20px; background:rgba(139,150,168,0.1); border-radius:2px; overflow:hidden;}
+    .group-bar-target{position:absolute; top:0; bottom:0; width:2px; background:#f2ede2; z-index:3;}
+    .group-bar-fill{position:absolute; top:0; bottom:0; left:0; border-radius:2px;}
+    .group-nums{font-family:'IBM Plex Mono',monospace; font-size:12.5px; text-align:right; color:#c7cbd4;}
+    .group-nums .over{color:#d9765b;}
+    .group-nums .under{color:#7fae94;}
+    .legend-dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px;}
+
+    /* trend chart */
+    .trend-box{border:1px solid rgba(139,150,168,0.18); padding:20px 24px 8px 24px;}
+    .trend-legend{display:flex; gap:18px; flex-wrap:wrap; margin-bottom:14px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:#c7cbd4;}
+
+    /* ledger table */
+    .ledger-controls{display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;}
+    .chip{
+      font-family:'IBM Plex Mono',monospace; font-size:11px; padding:6px 12px; border:1px solid rgba(139,150,168,0.3);
+      color:#c7cbd4; cursor:pointer; background:transparent; border-radius:2px; transition:all .15s;
+    }
+    .chip:hover{border-color:#c9a227; color:#f2ede2;}
+    .chip.active{background:#c9a227; color:#0d1826; border-color:#c9a227; font-weight:600;}
+    .search-input{
+      font-family:'IBM Plex Mono',monospace; font-size:12px; background:transparent; border:1px solid rgba(139,150,168,0.3);
+      color:#e8e9ec; padding:6px 12px; border-radius:2px; outline:none; min-width:180px;
+    }
+    .search-input:focus{border-color:#c9a227;}
+    table{width:100%; border-collapse:collapse; font-size:13px;}
+    thead th{
+      text-align:left; font-family:'IBM Plex Mono',monospace; font-size:10.5px; letter-spacing:0.08em; text-transform:uppercase;
+      color:#8b96a8; padding:8px 10px; border-bottom:1px solid rgba(201,162,39,0.3); cursor:pointer; user-select:none;
+    }
+    thead th:hover{color:#c9a227;}
+    thead th.num, td.num{text-align:right;}
+    tbody td{padding:10px 10px; border-bottom:1px solid rgba(139,150,168,0.1); font-family:'IBM Plex Mono',monospace; font-size:12.5px; vertical-align:middle;}
+    tbody tr:hover{background:rgba(201,162,39,0.05);}
+    .cat-name{font-family:'IBM Plex Sans',sans-serif; font-size:13px;}
+    .group-tag{
+      display:inline-block; font-size:9.5px; padding:2px 7px; border-radius:10px; font-family:'IBM Plex Mono',monospace;
+      letter-spacing:0.04em;
+    }
+    .mini-bar-track{width:100px; height:6px; background:rgba(139,150,168,0.15); position:relative; display:inline-block; vertical-align:middle;}
+    .mini-bar-fill{position:absolute; top:0; left:0; bottom:0;}
+    .mini-bar-target{position:absolute; top:-2px; bottom:-2px; width:1.5px; background:#f2ede2;}
+    .var-over{color:#d9765b;}
+    .var-under{color:#7fae94;}
+
+    /* simulator */
+    .sim-box{border:1px solid rgba(201,162,39,0.25); padding:24px;}
+    .sim-summary{display:flex; gap:32px; margin-bottom:22px; flex-wrap:wrap;}
+    .sim-stat .k{font-family:'IBM Plex Mono',monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:0.1em; color:#8b96a8;}
+    .sim-stat .v{font-family:'IBM Plex Mono',monospace; font-size:24px; margin-top:4px;}
+    .sim-row{display:grid; grid-template-columns:220px 1fr 90px 70px; gap:14px; align-items:center; padding:9px 0; border-bottom:1px solid rgba(139,150,168,0.1);}
+    .sim-row-name{font-size:12.5px;}
+    .sim-slider{width:100%; accent-color:#c9a227;}
+    .sim-val{font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right;}
+    .sim-actual{font-family:'IBM Plex Mono',monospace; font-size:11px; color:#8b96a8; text-align:right;}
+    .sim-buttons{display:flex; gap:10px; margin-top:18px;}
+    .btn{
+      font-family:'IBM Plex Mono',monospace; font-size:11.5px; padding:8px 16px; border:1px solid rgba(201,162,39,0.5);
+      background:transparent; color:#c9a227; cursor:pointer; border-radius:2px;
+    }
+    .btn:hover{background:#c9a227; color:#0d1826;}
+
+    footer{margin-top:60px; padding-top:20px; border-top:1px solid rgba(139,150,168,0.15); font-family:'IBM Plex Mono',monospace; font-size:11px; color:#5c6779;}
+
+    @media (max-width:640px){
+      .hero{grid-template-columns:1fr;}
+      .hero-left{border-right:none; border-bottom:1px solid rgba(201,162,39,0.2);}
+      .group-row{grid-template-columns:1fr; gap:6px;}
+      .group-nums{text-align:left;}
+      .sim-row{grid-template-columns:1fr; gap:4px;}
+      table{font-size:11px;}
+      thead th{padding:6px 4px;}
+      tbody td{padding:8px 4px;}
+      .mini-bar-track{width:60px;}
+      .hero-number{font-size:34px;}
+    }
+  `;
+  return s;
+}
+
+/* ============ HEADER ============ */
+function buildHeader(){
+  const wrap = el('div','lg-header');
+  const inner = el('div','wrap');
+  inner.appendChild(el('div','lg-eyebrow','LEDGER · 2026'));
+  inner.appendChild(el('div','lg-title serif','Spending Dashboard'));
+  inner.appendChild(el('div','lg-sub','Actuals from bills26 (Jan–Jul) vs. Budget 2026 targets · 7-month average · all figures in PLN'));
+  wrap.appendChild(inner);
+  return wrap;
+}
+
+/* ============ HERO ============ */
+function buildHero(){
+  const section = el('div','wrap');
+  const hero = el('div','hero');
+
+  const left = el('div','hero-left');
+  const rows = [
+    ["7-month actual average", fmt1(TOTAL_AVG)],
+    ["Monthly target ceiling", fmt1(TOTAL_TARGET)],
+    ["Over target by", "+"+fmt1(TOTAL_AVG-TOTAL_TARGET)],
+  ];
+  rows.forEach(([k,v])=>{
+    const r = el('div','hero-row');
+    r.appendChild(el('div','k',k));
+    r.appendChild(el('div','v mono',v));
+    left.appendChild(r);
+  });
+  const bigLabel = el('div','hero-label','AVG MONTHLY SPEND');
+  const bigNum = el('div','hero-number over',fmt1(TOTAL_AVG));
+  left.insertBefore(bigNum, left.firstChild);
+  left.insertBefore(bigLabel, left.firstChild);
+
+  const right = el('div','hero-right');
+  const cutPct = (TOTAL_AVG-TOTAL_TARGET)/TOTAL_AVG;
+  const stamp = el('div','stamp');
+  stamp.appendChild(el('div','big', (cutPct*100).toFixed(1)+"%"));
+  stamp.appendChild(el('div','small','CUT NEEDED · GOAL ≥15%'));
+  right.appendChild(stamp);
+
+  hero.appendChild(left);
+  hero.appendChild(right);
+  section.appendChild(hero);
+  return section;
+}
+
+/* ============ GROUP SECTION ============ */
+function buildGroupSection(){
+  const wrap = el('div','section wrap');
+  const head = el('div','section-head');
+  head.appendChild(el('div','section-title serif','Spend by group'));
+  head.appendChild(el('div','section-note','target line in white · fill = 7-mo avg'));
+  wrap.appendChild(head);
+
+  const maxVal = Math.max(...GROUP_ORDER.map(g=>Math.max(GROUP_TARGETS[g], groupAvg(g))));
+
+  GROUP_ORDER.forEach(g=>{
+    const avg = groupAvg(g);
+    const target = GROUP_TARGETS[g];
+    const row = el('div','group-row');
+    const nameEl = el('div','group-name');
+    nameEl.innerHTML = `<span class="legend-dot" style="background:${GROUP_COLORS[g]}"></span>${g}`;
+    row.appendChild(nameEl);
+
+    const track = el('div','group-bar-track');
+    const fillPct = Math.min(100,(avg/maxVal)*100);
+    const targetPct = Math.min(100,(target/maxVal)*100);
+    const fill = el('div','group-bar-fill');
+    fill.style.width = fillPct+"%";
+    fill.style.background = GROUP_COLORS[g];
+    const tline = el('div','group-bar-target');
+    tline.style.left = targetPct+"%";
+    track.appendChild(fill);
+    track.appendChild(tline);
+    row.appendChild(track);
+
+    const diff = target-avg;
+    const numsEl = el('div','group-nums');
+    numsEl.innerHTML = `${fmt1(avg)} <span class="${diff<0?'over':'under'}">(${diff<0?'+':''}${fmt1(-diff)})</span>`;
+    row.appendChild(numsEl);
+
+    wrap.appendChild(row);
+  });
+
+  return wrap;
+}
+function groupAvg(g){
+  return CATEGORIES.filter(c=>c.group===g).reduce((s,c)=>s+c.avg,0);
+}
+
+/* ============ TREND SECTION ============ */
+function buildTrendSection(){
+  const wrap = el('div','section wrap');
+  const head = el('div','section-head');
+  head.appendChild(el('div','section-title serif','Monthly trend by group'));
+  head.appendChild(el('div','section-note','Jan – Jul 2026'));
+  wrap.appendChild(head);
+
+  const box = el('div','trend-box');
+  const legend = el('div','trend-legend');
+  GROUP_ORDER.forEach(g=>{
+    const item = document.createElement('span');
+    item.innerHTML = `<span class="legend-dot" style="background:${GROUP_COLORS[g]}"></span>${g}`;
+    legend.appendChild(item);
+  });
+  box.appendChild(legend);
+  box.appendChild(buildStackedChart());
+  wrap.appendChild(box);
+  return wrap;
+}
+
+function buildStackedChart(){
+  const W = 960, H = 300, padL = 50, padB = 30, padT = 10, padR = 10;
+  const chartW = W - padL - padR, chartH = H - padT - padB;
+
+  // per-month totals by group
+  const data = MONTHS.map((m,mi)=>{
+    const row = {};
+    GROUP_ORDER.forEach(g=>{
+      row[g] = CATEGORIES.filter(c=>c.group===g).reduce((s,c)=>s+(c.monthly[mi]||0),0);
+    });
+    return row;
+  });
+  const totals = data.map(row=>GROUP_ORDER.reduce((s,g)=>s+row[g],0));
+  const maxTotal = Math.max(...totals, TOTAL_TARGET);
+
+  const barW = chartW/MONTHS.length*0.6;
+  const gap = chartW/MONTHS.length;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="overflow:visible">`;
+
+  // gridlines
+  for(let i=0;i<=4;i++){
+    const y = padT + chartH - (chartH*i/4);
+    const val = Math.round(maxTotal*i/4);
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="rgba(139,150,168,0.12)" stroke-width="1"/>`;
+    svg += `<text x="${padL-8}" y="${y+4}" text-anchor="end" font-family="IBM Plex Mono" font-size="9.5" fill="#8b96a8">${(val/1000).toFixed(1)}k</text>`;
+  }
+
+  // target line
+  const targetY = padT + chartH - (chartH*TOTAL_TARGET/maxTotal);
+  svg += `<line x1="${padL}" y1="${targetY}" x2="${W-padR}" y2="${targetY}" stroke="#f2ede2" stroke-width="1.3" stroke-dasharray="4 3"/>`;
+  svg += `<text x="${W-padR}" y="${targetY-6}" text-anchor="end" font-family="IBM Plex Mono" font-size="9.5" fill="#f2ede2">target ${(TOTAL_TARGET/1000).toFixed(1)}k</text>`;
+
+  MONTHS.forEach((m,mi)=>{
+    const x = padL + gap*mi + (gap-barW)/2;
+    let yCursor = padT + chartH;
+    GROUP_ORDER.forEach(g=>{
+      const val = data[mi][g];
+      const h = chartH*val/maxTotal;
+      yCursor -= h;
+      svg += `<rect x="${x}" y="${yCursor}" width="${barW}" height="${h}" fill="${GROUP_COLORS[g]}" opacity="0.92"><title>${g} ${m}: ${fmt1(val)}</title></rect>`;
+    });
+    svg += `<text x="${x+barW/2}" y="${padT+chartH+18}" text-anchor="middle" font-family="IBM Plex Mono" font-size="10.5" fill="#c7cbd4">${m}</text>`;
+  });
+
+  svg += `</svg>`;
+  const container = document.createElement('div');
+  container.innerHTML = svg;
+  return container.firstElementChild;
+}
+
+/* ============ LEDGER TABLE SECTION ============ */
+function buildLedgerSection(){
+  const wrap = el('div','section wrap');
+  const head = el('div','section-head');
+  head.appendChild(el('div','section-title serif','Category ledger'));
+  head.appendChild(el('div','section-note', CATEGORIES.length+' categories · ranked by 7-mo average spend'));
+  wrap.appendChild(head);
+
+  const controls = el('div','ledger-controls');
+  const groups = ["All", ...GROUP_ORDER];
+  groups.forEach(g=>{
+    const chip = el('button','chip'+(state.filterGroup===g?' active':''), g);
+    chip.onclick = ()=>{ state.filterGroup = g; render(); };
+    controls.appendChild(chip);
+  });
+  const search = document.createElement('input');
+  search.type = 'text';
+  search.className = 'search-input';
+  search.placeholder = 'Search category…';
+  search.value = state.search;
+  search.oninput = (e)=>{ state.search = e.target.value; renderLedgerTableOnly(); };
+  controls.appendChild(search);
+  wrap.appendChild(controls);
+
+  const tableContainer = el('div');
+  tableContainer.id = 'ledger-table-container';
+  tableContainer.appendChild(buildLedgerTable());
+  wrap.appendChild(tableContainer);
+
+  return wrap;
+}
+
+function renderLedgerTableOnly(){
+  const c = document.getElementById('ledger-table-container');
+  if(c){ c.innerHTML=""; c.appendChild(buildLedgerTable()); }
+}
+
+function buildLedgerTable(){
+  let rows = CATEGORIES.map(c=>({
+    ...c,
+    variance: c.target - c.avg // positive = under budget, negative = over
+  }));
+
+  if(state.filterGroup!=="All") rows = rows.filter(r=>r.group===state.filterGroup);
+  if(state.search.trim()) rows = rows.filter(r=>r.name.toLowerCase().includes(state.search.toLowerCase()));
+
+  rows.sort((a,b)=>{
+    let av = a[state.sortKey], bv = b[state.sortKey];
+    if(typeof av === 'string') return state.sortDir==='asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    return state.sortDir==='asc' ? av-bv : bv-av;
+  });
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  const cols = [
+    ["name","Category"], ["group","Group"], ["target","Target"], ["avg","7-mo Avg"], ["variance","Variance"]
+  ];
+  cols.forEach(([key,label])=>{
+    const th = document.createElement('th');
+    th.className = (key==='target'||key==='avg'||key==='variance') ? 'num' : '';
+    th.textContent = label + (state.sortKey===key ? (state.sortDir==='asc'?' ▲':' ▼') : '');
+    th.onclick = ()=>{
+      if(state.sortKey===key) state.sortDir = state.sortDir==='asc'?'desc':'asc';
+      else { state.sortKey=key; state.sortDir='desc'; }
+      renderLedgerTableOnly();
+    };
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const maxAvg = Math.max(...CATEGORIES.map(c=>c.avg), 1);
+
+  rows.forEach(r=>{
+    const tr = document.createElement('tr');
+
+    const tdName = document.createElement('td');
+    tdName.className = 'cat-name';
+    tdName.textContent = r.name;
+    tr.appendChild(tdName);
+
+    const tdGroup = document.createElement('td');
+    const tag = document.createElement('span');
+    tag.className = 'group-tag';
+    tag.textContent = r.group;
+    tag.style.background = GROUP_COLORS[r.group]+"26";
+    tag.style.color = GROUP_COLORS[r.group];
+    tdGroup.appendChild(tag);
+    tr.appendChild(tdGroup);
+
+    const tdTarget = document.createElement('td');
+    tdTarget.className = 'num';
+    tdTarget.textContent = fmt1(r.target);
+    tr.appendChild(tdTarget);
+
+    const tdAvg = document.createElement('td');
+    tdAvg.className = 'num';
+    const barTrack = document.createElement('span');
+    barTrack.className = 'mini-bar-track';
+    const barFill = document.createElement('span');
+    barFill.className = 'mini-bar-fill';
+    barFill.style.width = Math.min(100,(r.avg/maxAvg)*100)+"%";
+    barFill.style.background = r.avg>r.target ? '#d9765b' : '#7fae94';
+    const barTarget = document.createElement('span');
+    barTarget.className = 'mini-bar-target';
+    barTarget.style.left = Math.min(100,(r.target/maxAvg)*100)+"%";
+    barTrack.appendChild(barFill);
+    barTrack.appendChild(barTarget);
+    tdAvg.appendChild(document.createTextNode(fmt1(r.avg)+" "));
+    tdAvg.appendChild(barTrack);
+    tr.appendChild(tdAvg);
+
+    const tdVar = document.createElement('td');
+    tdVar.className = 'num ' + (r.variance<0?'var-over':'var-under');
+    tdVar.textContent = (r.variance<0?'−':'+') + fmt1(Math.abs(r.variance));
+    tr.appendChild(tdVar);
+
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  return table;
+}
+
+/* ============ SIMULATOR SECTION ============ */
+function buildSimSection(){
+  const wrap = el('div','section wrap');
+  const head = el('div','section-head');
+  head.appendChild(el('div','section-title serif','Budget simulator'));
+  head.appendChild(el('div','section-note','drag targets to test a new monthly plan'));
+  wrap.appendChild(head);
+
+  const box = el('div','sim-box');
+  box.id = 'sim-box';
+  renderSimBox(box);
+  wrap.appendChild(box);
+  return wrap;
+}
+
+function renderSimBox(box){
+  box.innerHTML = "";
+  const {total, byGroup} = computeSimTotals();
+  const cutPct = (total>0) ? (total-TOTAL_TARGET)/ (TOTAL_AVG) : 0;
+
+  const summary = el('div','sim-summary');
+  const stats = [
+    ["Simulated monthly total", fmt1(total)],
+    ["vs. actual avg ("+fmt1(TOTAL_AVG)+")", (total-TOTAL_AVG<=0?'−':'+')+fmt1(Math.abs(total-TOTAL_AVG))],
+    ["vs. target ceiling ("+fmt1(TOTAL_TARGET)+")", (total-TOTAL_TARGET<=0?'−':'+')+fmt1(Math.abs(total-TOTAL_TARGET))],
+  ];
+  stats.forEach(([k,v])=>{
+    const s = el('div','sim-stat');
+    s.appendChild(el('div','k',k));
+    const vEl = el('div','v mono',v);
+    if(k.startsWith('Simulated')) vEl.style.color = total<=TOTAL_TARGET ? '#7fae94' : '#d9765b';
+    s.appendChild(vEl);
+    summary.appendChild(s);
+  });
+  box.appendChild(summary);
+
+  const sorted = [...CATEGORIES].sort((a,b)=>b.avg-a.avg);
+  sorted.forEach(c=>{
+    const row = el('div','sim-row');
+    row.appendChild(el('div','sim-row-name',c.name));
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'sim-slider';
+    slider.min = 0;
+    slider.max = Math.max(c.avg*1.6, c.target*1.6, 100);
+    slider.step = 5;
+    slider.value = state.sim[c.name];
+    const valEl = el('div','sim-val mono', fmt1(state.sim[c.name]));
+    slider.oninput = (e)=>{
+      state.sim[c.name] = parseFloat(e.target.value);
+      valEl.textContent = fmt1(state.sim[c.name]);
+      renderSimBox(box);
+    };
+    row.appendChild(slider);
+    row.appendChild(valEl);
+    row.appendChild(el('div','sim-actual', 'avg '+fmt1(c.avg)));
+    box.appendChild(row);
+  });
+
+  const btnRow = el('div','sim-buttons');
+  const resetTarget = document.createElement('button');
+  resetTarget.className = 'btn';
+  resetTarget.textContent = 'Reset to budget targets';
+  resetTarget.onclick = ()=>{ CATEGORIES.forEach(c=>state.sim[c.name]=c.target); renderSimBox(box); };
+  const resetActual = document.createElement('button');
+  resetActual.className = 'btn';
+  resetActual.textContent = 'Reset to 7-mo averages';
+  resetActual.onclick = ()=>{ CATEGORIES.forEach(c=>state.sim[c.name]=c.avg); renderSimBox(box); };
+  btnRow.appendChild(resetTarget);
+  btnRow.appendChild(resetActual);
+  box.appendChild(btnRow);
+}
+
+/* ============ FOOTER ============ */
+function buildFooter(){
+  const f = document.createElement('footer');
+  const inner = el('div','wrap');
+  inner.textContent = 'Source: bills26 actuals → Budget 2026 (NEW) targets → this dashboard. Built from MainFinances_FromJuly2026.xlsx.';
+  f.appendChild(inner);
+  return f;
+}
+
+render();
+</script>
+</body>
+</html>
