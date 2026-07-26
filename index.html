@@ -166,6 +166,27 @@ function getCurrentMonthData(){
   };
 }
 
+/* Month-over-month totals: Jan–Jul from the static baseline (CATEGORIES.monthly),
+   plus any live months (Aug+) that actually have logged data. */
+function getMonthlyTotals(){
+  const staticMonths = MONTH_NAMES.slice(0,7).map((name, i) => ({
+    name,
+    total: CATEGORIES.reduce((s,c) => s + (c.monthly[i]||0), 0)
+  }));
+
+  let liveMonths = [];
+  if(liveData && liveData.monthlyByGroup){
+    const totalRow = liveData.monthlyByGroup.find(r => (r.name||'').toString().toUpperCase().includes('TOTAL'));
+    if(totalRow){
+      for(let i=7; i<12; i++){
+        const v = Math.abs(Number(totalRow.months[i]) || 0);
+        if(v>0) liveMonths.push({name: MONTH_NAMES[i], total: v});
+      }
+    }
+  }
+  return staticMonths.concat(liveMonths);
+}
+
 /* ============ HELPERS ============ */
 const fmt = n => {
   const rounded = Math.round(n);
@@ -290,10 +311,14 @@ function buildStyle(){
 
     /* compact average strip */
     .avg-strip-caption{margin-top:26px; margin-bottom:8px;}
-    .avg-strip{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:rgba(139,150,168,0.15); border:1px solid rgba(139,150,168,0.15);}
+    .avg-layout{display:grid; grid-template-columns:1fr 240px; gap:12px; align-items:stretch;}
+    .avg-strip{display:grid; grid-template-columns:repeat(2,1fr); gap:1px; background:rgba(139,150,168,0.15); border:1px solid rgba(139,150,168,0.15);}
     .avg-item{background:#0d1826; padding:14px 16px;}
     .avg-item-label{font-family:'IBM Plex Mono',monospace; font-size:9.5px; letter-spacing:0.08em; text-transform:uppercase; color:#8b96a8; margin-bottom:6px;}
     .avg-item-value{font-size:18px; color:#e8e9ec;}
+    .avg-spark-card{border:1px solid rgba(139,150,168,0.15); padding:14px 16px; display:flex; flex-direction:column;}
+    .avg-spark-inner{flex:1; display:flex; flex-direction:column; justify-content:center;}
+    .avg-spark-caption{font-family:'IBM Plex Mono',monospace; font-size:10px; color:#5c6779; margin-top:4px;}
 
     /* section */
     .section{margin-top:52px;}
@@ -302,8 +327,9 @@ function buildStyle(){
     .section-note{font-size:12.5px; color:#8b96a8; font-family:'IBM Plex Mono',monospace;}
 
     /* groups */
-    .group-row{display:grid; grid-template-columns: 150px 1fr 190px; gap:16px; align-items:center; padding:12px 0; border-bottom:1px solid rgba(139,150,168,0.12);}
+    .group-row{display:grid; grid-template-columns: 230px 1fr 190px; gap:16px; align-items:center; padding:10px 0; border-bottom:1px solid rgba(139,150,168,0.12);}
     .group-name{font-size:14px; font-weight:500;}
+    .cat-row-name{font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
     .group-bar-track{position:relative; height:20px; background:rgba(139,150,168,0.1); border-radius:2px; overflow:hidden;}
     .group-bar-target{position:absolute; top:0; bottom:0; width:2px; background:#f2ede2; z-index:3;}
     .group-bar-fill{position:absolute; top:0; bottom:0; left:0; border-radius:2px;}
@@ -410,7 +436,7 @@ function buildStyle(){
       .cm-stamp{width:100%;}
       .cm-number{font-size:38px;}
       .cm-group-row{grid-template-columns:1fr; gap:4px;}
-      .avg-strip{grid-template-columns:repeat(2,1fr);}
+      .avg-layout{grid-template-columns:1fr;}
       .group-row{grid-template-columns:1fr; gap:6px;}
       .group-nums{text-align:left;}
       .sim-row{grid-template-columns:1fr; gap:4px;}
@@ -596,6 +622,8 @@ function buildAverageStrip(){
   const over = totals.avg - totals.target;
   const cutPct = totals.cutPct!==undefined ? totals.cutPct : over/totals.avg;
 
+  const layout = el('div','avg-layout');
+
   const strip = el('div','avg-strip');
   const items = [
     ["7-mo average", fmt1(totals.avg)],
@@ -609,27 +637,76 @@ function buildAverageStrip(){
     item.appendChild(el('div','avg-item-value mono',v));
     strip.appendChild(item);
   });
+  layout.appendChild(strip);
+
+  const months = getMonthlyTotals();
+  if(months.length>=2){
+    const sparkCard = el('div','avg-spark-card');
+    sparkCard.appendChild(el('div','avg-item-label','MoM tendency'));
+    sparkCard.appendChild(buildMoMSparkline(months));
+    layout.appendChild(sparkCard);
+  }
+
   section.appendChild(el('div','section-note avg-strip-caption','Jan–Jul historical baseline'));
-  section.appendChild(strip);
+  section.appendChild(layout);
   return section;
+}
+
+function buildMoMSparkline(months){
+  const W = 220, H = 64, padX = 6, padY = 10;
+  const vals = months.map(m=>m.total);
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const range = (max-min) || 1;
+  const stepX = (W - padX*2) / (months.length-1);
+  const points = vals.map((v,i)=>{
+    const x = padX + stepX*i;
+    const y = padY + (H - padY*2) * (1 - (v-min)/range);
+    return [x,y];
+  });
+
+  const lastUp = vals[vals.length-1] > vals[vals.length-2];
+  const lineColor = lastUp ? '#d9765b' : '#7fae94';
+
+  const pathD = points.map((p,i)=> (i===0?'M':'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+  const areaD = pathD + ` L${points[points.length-1][0].toFixed(1)},${H-padY} L${points[0][0].toFixed(1)},${H-padY} Z`;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="overflow:visible">`;
+  svg += `<path d="${areaD}" fill="${lineColor}" opacity="0.08"/>`;
+  svg += `<path d="${pathD}" fill="none" stroke="${lineColor}" stroke-width="1.6"/>`;
+  points.forEach((p,i)=>{
+    const isLast = i===points.length-1;
+    svg += `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="${isLast?3:2}" fill="${isLast?lineColor:'#5c6779'}"><title>${months[i].name}: ${fmt1(vals[i])}</title></circle>`;
+  });
+  svg += `</svg>`;
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = svg;
+  const svgEl = wrap.firstElementChild;
+
+  const container = el('div','avg-spark-inner');
+  container.appendChild(svgEl);
+  const caption = el('div','avg-spark-caption');
+  caption.innerHTML = `${months[0].name}\u2013${months[months.length-1].name} · latest ${fmt1(vals[vals.length-1])}`;
+  container.appendChild(caption);
+  return container;
 }
 
 /* ============ GROUP SECTION ============ */
 function buildGroupSection(){
   const wrap = el('div','section wrap');
   const head = el('div','section-head');
-  head.appendChild(el('div','section-title serif','Spend by group · Jan–Jul baseline'));
+  head.appendChild(el('div','section-title serif','Spend by category · Jan–Jul baseline'));
   head.appendChild(el('div','section-note','target line in white · fill = 7-mo avg'));
   wrap.appendChild(head);
 
-  const groups = getGroups();
-  const maxVal = Math.max(...groups.map(g=>Math.max(g.target, g.avg)));
+  const cats = getCategories().filter(c=>c.avg>0 || c.target>0).slice().sort((a,b)=>b.avg-a.avg);
+  const maxVal = Math.max(...cats.map(c=>Math.max(c.target, c.avg)), 1);
 
-  groups.forEach(g=>{
-    const avg = g.avg, target = g.target;
+  cats.forEach(c=>{
+    const avg = c.avg, target = c.target;
     const row = el('div','group-row');
-    const nameEl = el('div','group-name');
-    nameEl.innerHTML = `<span class="legend-dot" style="background:${GROUP_COLORS[g.name]||'#8b96a8'}"></span>${g.name}`;
+    const nameEl = el('div','group-name cat-row-name');
+    nameEl.innerHTML = `<span class="legend-dot" style="background:${GROUP_COLORS[c.group]||'#8b96a8'}"></span>${c.name}`;
     row.appendChild(nameEl);
 
     const track = el('div','group-bar-track');
@@ -637,7 +714,7 @@ function buildGroupSection(){
     const targetPct = Math.min(100,(target/maxVal)*100);
     const fill = el('div','group-bar-fill');
     fill.style.width = fillPct+"%";
-    fill.style.background = GROUP_COLORS[g.name]||'#8b96a8';
+    fill.style.background = GROUP_COLORS[c.group]||'#8b96a8';
     const tline = el('div','group-bar-target');
     tline.style.left = targetPct+"%";
     track.appendChild(fill);
